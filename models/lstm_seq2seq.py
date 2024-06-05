@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from vocab import Vocab
 from collections import namedtuple
+import os
+
 
 Hypothesis = namedtuple('Hypothesis', ['value', 'score'])
 
@@ -21,10 +23,11 @@ class ModelEmbedding(nn.Module):
 
 
 class LstmNMT(nn.Module):
-    def __init__(self, embed_size, hidden_size, tokenizer: Vocab, dropout: float = 0.2):
+    def __init__(self, embed_size, hidden_size, tokenizer: Vocab, dropout_rate: float = 0.2):
         super().__init__()
         self.tokenizer = tokenizer
         self.hidden_size = hidden_size
+        self.dropout_rate = dropout_rate
 
         self.embedding_layer = ModelEmbedding(embed_size, tokenizer)
         self.encoder = nn.LSTM(input_size=embed_size,
@@ -45,8 +48,7 @@ class LstmNMT(nn.Module):
         self.decode_proj = nn.Linear(3 * hidden_size, hidden_size)
 
         self.proj2words = nn.Linear(hidden_size, len(tokenizer.tgt))
-
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, src: Tensor, src_lengths: List[int], tgt: Tensor):
         encoded_states, state = self.encode(src, src_lengths)
@@ -125,8 +127,19 @@ class LstmNMT(nn.Module):
             mask[i, :src_length] = 1
         return mask.to(self.device)
 
-    def beam_search(self, src: List[int], src_lengths: List[int], beam_size=5, max_decoding_time_step=70):
-        encoded_states, dec_state = self.encode(src.unsqueeze(dim=0), src_lengths)
+    def beam_search(self, src: Tensor, src_lengths: List[int], beam_size=5, max_decoding_time_step=70):
+        """
+
+        Args:
+            src (Tensor): (1, L)
+            src_lengths (List[int]): _description_
+            beam_size (int, optional): _description_. Defaults to 5.
+            max_decoding_time_step (int, optional): _description_. Defaults to 70.
+
+        Returns:
+            _type_: _description_
+        """
+        encoded_states, dec_state = self.encode(src, src_lengths)
         projected_encoded_states = self.encode_proj(encoded_states)
 
         # initial state: only one hypothesis
@@ -159,6 +172,7 @@ class LstmNMT(nn.Module):
 
             # update the score of each hypothesis
             scores_expand = hypo_scores.unsqueeze(dim=1).expand(-1, p.size(1))
+            # print(f"p device: {p.device}, scores_expand: {scores_expand.device}")
             all_potential_hypotheses_scores = (scores_expand + p).view(-1)
             scores, indices = torch.topk(all_potential_hypotheses_scores, k=beam_size - len(completed_hypotheses))
 
@@ -170,12 +184,12 @@ class LstmNMT(nn.Module):
                 hypo_idx = index.item() // p.size(1)
                 word_idx = index.item() % p.size(1)
                 if word_idx == eos_id: 
-                    completed_hypotheses.append(Hypothesis(value=hypotheses[hypo_idx][1:]), scores=scores[i].item())
+                    completed_hypotheses.append(Hypothesis(value=hypotheses[hypo_idx][1:], score=scores[i].item()))
                 else:
                     new_hypo.append(hypotheses[hypo_idx] + [self.tokenizer.tgt.id2word[word_idx]])
                     new_hypo_indices.append(hypo_idx)
                     new_hypo_scores.append(scores[i])
-            hypo_scores = torch.tensor(new_hypo_scores)
+            hypo_scores = torch.tensor(new_hypo_scores, device=self.device)
             hypotheses = new_hypo
 
             # update the new dec_state
@@ -210,8 +224,9 @@ class LstmNMT(nn.Module):
         params = {
             'args': dict(embed_size=self.embedding_layer.embed_size,
                          hidden_size=self.hidden_size,
-                         dropout=self.dropout),
+                         dropout_rate=self.dropout_rate),
             'vocab': self.tokenizer,
             'model': self.state_dict()
         }
-        torch.save(path, params=params)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(params, path)

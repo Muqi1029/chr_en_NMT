@@ -18,7 +18,7 @@ def parse_args(args=None):
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_epochs", type=int, default=10)
-    parser.add_argument("--uniform_init", type=float, default=0.2)
+    parser.add_argument("--uniform_init", type=float, default=0.1)
 
     parser.add_argument("--train_src", type=str,
                         default="chr_en_data/train.chr")
@@ -28,12 +28,13 @@ def parse_args(args=None):
     parser.add_argument("--dev_tgt", type=str, default="chr_en_data/dev.en")
 
     parser.add_argument("--vocab", type=str, default="vocab.json")
-    parser.add_argument("--lr", type=float, default=0.0001)
-    parser.add_argument("--lr_decay", type=float, default=0.01)
+    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr_decay", type=float, default=0.5)
     parser.add_argument("--model_path", type=str,
                         default="checkpoint/model.params")
 
-    parser.add_argument("--clip_grad", type=float, default=5)
+    parser.add_argument("--patient", type=int, default=1)
+    parser.add_argument("--clip_grad", type=float, default=5.0)
     parser.add_argument("--valid_per_epoch", type=int, default=3)
 
     args = parser.parse_args(args)
@@ -56,7 +57,7 @@ def main():
 
     # 3. get model
     model = LstmNMT(embed_size=args.embed_size, hidden_size=args.hidden_size,
-                    tokenizer=tokenizer, dropout=args.dropout)
+                    tokenizer=tokenizer, dropout_rate=args.dropout)
     uniform_init = float(args.uniform_init)
     if np.abs(uniform_init) > 0.:
         print('uniformly initialize parameters [-%f, +%f]' %
@@ -64,18 +65,18 @@ def main():
         for p in model.parameters():
             p.data.uniform_(-uniform_init, uniform_init)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"load model from {device}")
+    print(f"model to {device}")
     model.to(device)
 
     # 4. train the model
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
-    train(model, train_dataloader, dev_dataloader, optimizer, args)
+    train(model, train_dataloader, dev_dataloader, optimizer, device, args)
 
     # 5. save the model
     model.save(args.model_path)
 
 
-def valid(model, dev_dataloader, args):
+def valid(model, dev_dataloader, device, args):
     is_train = model.training
     model.eval()
     print("start to evaluate model".center(50, "="))
@@ -83,17 +84,18 @@ def valid(model, dev_dataloader, args):
     tgt_words = AverageMeter("tgt_words")
     with torch.no_grad():
         for (src, src_lengths), tgt in tqdm(dev_dataloader):
+            src = src.to(device)
+            tgt = tgt.to(device)
             l = model(src, src_lengths, tgt)
             loss.update(l.item())
             tgt_words.update(sum([len(s) - 1 for s in tgt]))
         ppl = np.exp(loss.sum / tgt_words.sum)
     if is_train:
         model.train()
-
     return ppl
 
 
-def train(model, train_dataloader, dev_dataloader, optimizer, args):
+def train(model, train_dataloader, dev_dataloader, optimizer, device, args):
     model.train()
     hist_valid_scores = []
     num_trial = 0
@@ -106,7 +108,10 @@ def train(model, train_dataloader, dev_dataloader, optimizer, args):
             prefix="Epoch %d" % epoch)
         for cur_batch, ((src, src_lengths), tgt) in enumerate(train_dataloader):
             start_time = time.time()
+            src = src.to(device)
+            tgt = tgt.to(device)
             l = model(src, src_lengths, tgt)
+            l /= len(src)
             optimizer.zero_grad()
             l.backward()
             clip_grad_norm_(model.parameters(), args.clip_grad)
@@ -115,7 +120,9 @@ def train(model, train_dataloader, dev_dataloader, optimizer, args):
             loss_metric.update(l.item())
             progress.display(cur_batch=cur_batch + 1)
         if epoch % args.valid_per_epoch == 0:
-            score = -valid(model. dev_dataloader, args=args)
+            # start to evaluate
+            score = -valid(model, dev_dataloader, device, args=args)
+            print(f"score {score} ")
             is_better = len(hist_valid_scores) == 0 or score > max(
                 hist_valid_scores)
             if is_better:

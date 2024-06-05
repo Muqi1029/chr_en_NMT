@@ -5,6 +5,7 @@ from tqdm import tqdm
 from utils import compute_bleu, read_corpus, spm_decode
 from vocab import Vocab
 from models.lstm_seq2seq import LstmNMT
+import os
 import numpy as np
 
 
@@ -29,26 +30,29 @@ def decode():
     tokenizer = Vocab.load(args.vocab_path)
     test_data_src = read_corpus(args.input_src, source='src')
 
-    print(f"load model from {args.model_path}")
     model = LstmNMT.load(args.model_path)
-    if args.cuda:
-        model.to(torch.device("cuda"))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"using device {device}")
+    model.to(device)
     hypotheses = []
     model.eval()
     with torch.no_grad():
         for src_sent in tqdm(test_data_src, desc="Decoding..."):
             src = tokenizer.src.words2indices(src_sent)
+            src = torch.tensor([src], dtype=torch.long, device=device)
             hypo = model.beam_search(src, 
-                                     len(src_sent),
+                                     [len(src_sent)],
                                      beam_size=args.beam_size,
                                      max_decoding_time_step=args.max_decoding_timestamp)
             hypotheses.append(hypo)
 
+    os.makedirs(os.path.dirname(args.decode_path), exist_ok=True)
     with open(args.decode_path, "w") as f:
         top_hypotheses = [spm_decode(hypo[0].value) for hypo in hypotheses]
+        # print(type(top_hypotheses[0]))
         if args.input_tgt:
             test_data_tgt = read_corpus(args.input_tgt, "tgt", test=True)
-            bleu = np.mean([compute_bleu(hypo, [tgt]) for hypo, tgt in zip(top_hypotheses, test_data_tgt)])
+            bleu = np.mean([compute_bleu(hypo, [" ".join(tgt)]) for hypo, tgt in zip(top_hypotheses, test_data_tgt)])
             print(f"Corpus BLEU: {bleu}")
         for hypo in top_hypotheses:
             f.write(hypo + "\n")
